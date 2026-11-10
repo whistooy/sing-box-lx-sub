@@ -131,7 +131,7 @@ func (g *URLTestGroup) penaltyReset(tag string) {
 func (g *URLTestGroup) fastestByDelay(network string) adapter.Outbound {
 	var minDelay uint16
 	var minOutbound adapter.Outbound
-	for _, detour := range g.outbounds {
+	for _, detour := range g.getOutbounds() {
 		if !supportsNetwork(detour, network) {
 			continue
 		}
@@ -159,7 +159,7 @@ func (g *URLTestGroup) penaltyBest(network string, excludeTag string) adapter.Ou
 	var best adapter.Outbound
 	var bestPenalty int64
 	var bestDelay uint16
-	for _, detour := range g.outbounds {
+	for _, detour := range g.getOutbounds() {
 		if !supportsNetwork(detour, network) {
 			continue
 		}
@@ -321,7 +321,7 @@ func (g *URLTestGroup) maybeForceRetest() {
 // penaltyTotal — «тотальные штрафы»: есть кандидаты с history, и все ≥ порога.
 func (g *URLTestGroup) penaltyTotal(network string) bool {
 	var sawCandidate bool
-	for _, detour := range g.outbounds {
+	for _, detour := range g.getOutbounds() {
 		if !supportsNetwork(detour, network) {
 			continue
 		}

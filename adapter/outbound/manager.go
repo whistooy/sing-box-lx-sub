@@ -24,6 +24,7 @@ type Manager struct {
 	outboundByTag   map[string]adapter.Outbound
 	defaultOutbound adapter.Outbound
 	sortedOutbounds []adapter.Outbound
+	managerProviderState
 }
 
 func NewManager(registry adapter.OutboundRegistry, endpoint adapter.EndpointManager, defaultTag string) *Manager {
@@ -63,6 +64,7 @@ func (m *Manager) Initialize(defaultOutboundFallback func() (adapter.Outbound, e
 }
 
 func (m *Manager) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+	m.beginStart(stage, scope)
 	m.access.RLock()
 	sortedOutbounds := m.sortedOutbounds
 	m.access.RUnlock()
@@ -80,8 +82,9 @@ func (m *Manager) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 		if !isLifecycle {
 			continue
 		}
+		targetScope := m.targetScope(scope, outbound.Tag())
 		name := "outbound/" + outbound.Type() + "[" + outbound.Tag() + "]"
-		err := scope.Start(name, lifecycle, stage)
+		err := targetScope.Start(name, lifecycle, stage)
 		if err != nil {
 			return err
 		}
@@ -172,14 +175,17 @@ func (m *Manager) Create(ctx context.Context, router adapter.Router, logger log.
 	}
 	m.access.Lock()
 	defer m.access.Unlock()
+	if err = m.checkDynamicClosed(outbound); err != nil {
+		return err
+	}
 	_, loaded := m.outboundByTag[tag]
 	if loaded {
 		return E.New("duplicate outbound tag: ", tag)
 	}
 	m.outbounds = append(m.outbounds, outbound)
 	m.outboundByTag[tag] = outbound
-	if tag == m.defaultTag || (m.defaultTag == "" && m.defaultOutbound == nil) {
+	if tag == m.defaultTag || (m.defaultTag == "" && m.defaultOutbound == nil && !m.isDynamicTagLocked(tag)) {
 		m.defaultOutbound = outbound
 	}
-	return nil
+	return m.finishCreateDynamic(ctx, logger, outbound, inboundType, tag)
 }

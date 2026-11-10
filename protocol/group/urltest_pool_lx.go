@@ -112,7 +112,7 @@ func (s *URLTest) selectBalanced(ctx context.Context, network string, destinatio
 
 // poolSize is the effective pool size for the current node set: min(configured, available).
 func (g *URLTestGroup) poolSize() int {
-	return min(g.balancer.poolSize, len(g.outbounds))
+	return min(g.balancer.poolSize, len(g.getOutbounds()))
 }
 
 // balancePool is the per-interval lazy health-check for round_robin. It tests no more nodes
@@ -216,11 +216,12 @@ func (g *URLTestGroup) rrReprobePool(ctx context.Context, result map[string]uint
 // replacement search (SPEC 138 §5). It adds the live ones to result and returns the nodes
 // it tested and the live ones in walk order.
 func (g *URLTestGroup) rrWalkPool(ctx context.Context, size, holes int, inPool map[string]bool, result map[string]uint16) (map[string]bool, []string) {
+	outbounds := g.getOutbounds()
 	reserve := rrPoolReserve(size)
-	walked := make(map[string]bool, len(g.outbounds))
+	walked := make(map[string]bool, len(outbounds))
 	var order []string
-	candidates := make([]adapter.Outbound, 0, len(g.outbounds))
-	for _, detour := range g.outbounds {
+	candidates := make([]adapter.Outbound, 0, len(outbounds))
+	for _, detour := range outbounds {
 		if !inPool[detour.Tag()] {
 			candidates = append(candidates, detour)
 		}
@@ -249,12 +250,13 @@ func (g *URLTestGroup) rrWalkPool(ctx context.Context, size, holes int, inPool m
 // balancePoolTolerant (pool_tolerance > 0): test all nodes, then pick the top-`size` by delay,
 // replacing a pool member only when an outside node beats it by more than the tolerance.
 func (g *URLTestGroup) balancePoolTolerant(ctx context.Context, size int) map[string]uint16 {
-	result := g.testNodes(ctx, g.outbounds, true)
+	outbounds := g.getOutbounds()
+	result := g.testNodes(ctx, outbounds, true)
 	if !g.balancer.rrRunGotAnswer() {
 		return result // lx: SPEC 019 — a run with no answer lays out nothing
 	}
-	results := make(map[string]candidate, len(g.outbounds))
-	for _, detour := range g.outbounds {
+	results := make(map[string]candidate, len(outbounds))
+	for _, detour := range outbounds {
 		tag := detour.Tag()
 		delay, ok := result[tag]
 		results[tag] = candidate{tag: tag, delay: delay, alive: ok && !g.balancer.rrRunStruck(tag)} // lx: SPEC 138 §5 — no node struck out during the run
@@ -274,8 +276,9 @@ func (g *URLTestGroup) rebuildPool() {
 	if size == 0 {
 		return
 	}
-	results := make(map[string]candidate, len(g.outbounds))
-	for _, detour := range g.outbounds {
+	outbounds := g.getOutbounds()
+	results := make(map[string]candidate, len(outbounds))
+	for _, detour := range outbounds {
 		tag := detour.Tag()
 		if history := g.history.LoadURLTestHistory(RealTag(detour, N.NetworkTCP)); history != nil {
 			results[tag] = candidate{tag: tag, delay: history.Delay, alive: true}
@@ -297,7 +300,7 @@ func (g *URLTestGroup) rebuildPool() {
 	live := make(map[string]bool, len(results))
 	// Fill holes with live non-pool nodes, fastest first (history is warm after the force test).
 	fillCandidates := make([]candidate, 0, len(results))
-	for _, detour := range g.outbounds {
+	for _, detour := range outbounds {
 		c := results[detour.Tag()]
 		if c.alive {
 			live[c.tag] = true
@@ -344,9 +347,10 @@ func (g *URLTestGroup) seedPool() {
 	if size == 0 {
 		return
 	}
+	outbounds := g.getOutbounds()
 	// Nodes with existing history first (top by delay), then config order to fill.
-	withHistory := make([]candidate, 0, len(g.outbounds))
-	for _, detour := range g.outbounds {
+	withHistory := make([]candidate, 0, len(outbounds))
+	for _, detour := range outbounds {
 		if history := g.history.LoadURLTestHistory(RealTag(detour, N.NetworkTCP)); history != nil {
 			withHistory = append(withHistory, candidate{tag: detour.Tag(), delay: history.Delay, alive: true})
 		}
@@ -361,7 +365,7 @@ func (g *URLTestGroup) seedPool() {
 		next = append(next, c.tag)
 		seen[c.tag] = true
 	}
-	for _, detour := range g.outbounds {
+	for _, detour := range outbounds {
 		if len(next) >= size {
 			break
 		}

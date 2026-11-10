@@ -51,6 +51,7 @@ type URLTest struct {
 	checkAccess                  sync.Mutex
 	interruptExternalConnections bool
 	lxURLTest                    // lx: SPEC 019, SPEC 116 — round_robin and failover state (urltest_hooks_lx.go)
+	providerTracker              *providerTracker
 }
 
 func NewURLTest(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.URLTestOutboundOptions) (adapter.Outbound, error) {
@@ -65,10 +66,12 @@ func NewURLTest(ctx context.Context, router adapter.Router, logger log.ContextLo
 		tolerance:                    options.Tolerance,
 		idleTimeout:                  time.Duration(options.IdleTimeout),
 		interruptExternalConnections: options.InterruptExistConnections,
+		providerTracker:              newProviderTracker(ctx, options.Outbounds, options.Providers, options.UseAllProviders),
 	}
 	if err := outbound.initLx(logger, options); err != nil { // lx: SPEC 019, SPEC 116 — the mode of the group
 		return nil, err
 	}
+	outbound.tags = slices.Concat(outbound.tags, outbound.providerTracker.InitialTags())
 	if len(outbound.tags) == 0 {
 		return nil, E.New("missing tags")
 	}
@@ -98,6 +101,7 @@ func (s *URLTest) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 		s.startLx(group) // lx: SPEC 019, SPEC 020, 050, SPEC 116, SPEC 138 — the lx state of the group
 		s.group = group
 	case adapter.StartStateStarted:
+		s.startProviderTracker(scope)
 		s.group.PostStart()
 		scope.Add(s.group.Close)
 	}
@@ -105,6 +109,9 @@ func (s *URLTest) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 }
 
 func (s *URLTest) All() []string {
+	if s.providerTracker != nil {
+		return s.providerTracker.All()
+	}
 	return s.tags
 }
 
@@ -257,6 +264,7 @@ type URLTestGroup struct {
 	pauseCallback                *list.Element[pause.Callback]
 	logger                       log.Logger
 	outbounds                    []adapter.Outbound
+	outboundsSnapshot            atomic.Pointer[[]adapter.Outbound]
 	link                         string
 	interval                     time.Duration
 	tolerance                    uint16
@@ -372,7 +380,8 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
 			minDelay = history.Delay
 		}
 	}
-	for _, detour := range g.outbounds {
+	outbounds := g.getOutbounds()
+	for _, detour := range outbounds {
 		if !common.Contains(detour.Network(), network) {
 			continue
 		}
@@ -386,7 +395,7 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
 		}
 	}
 	if minOutbound == nil {
-		for _, detour := range g.outbounds {
+		for _, detour := range outbounds {
 			if !common.Contains(detour.Network(), network) {
 				continue
 			}
@@ -442,7 +451,7 @@ func (g *URLTestGroup) urlTest(ctx context.Context, force bool) (map[string]uint
 	if result, handled := g.urlTestLx(ctx, force); handled { // lx: SPEC 019, SPEC 116, SPEC 125 — the scheduled run of round_robin / failover, the tick pause
 		return result, nil
 	}
-	result := g.testNodes(ctx, g.outbounds, force) // lx: SPEC 019, SPEC 054, SPEC 125 — the probe hook, the tick freshness
+	result := g.testNodes(ctx, g.getOutbounds(), force) // lx: SPEC 019, SPEC 054, SPEC 125 — the probe hook, the tick freshness
 	g.afterTestLx(force)                           // lx: SPEC 019 — round_robin rebuilds the pool; SPEC 116 — a forced run re-selects in failover
 	g.history.NotifyUpdated()
 	return result, nil

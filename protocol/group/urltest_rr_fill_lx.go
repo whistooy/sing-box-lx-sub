@@ -46,7 +46,7 @@ func (g *URLTestGroup) rrFillOnAlive(tag string) {
 		return
 	}
 	member := false
-	for _, detour := range g.outbounds {
+	for _, detour := range g.getOutbounds() {
 		if detour.Tag() == tag {
 			member = true
 			break

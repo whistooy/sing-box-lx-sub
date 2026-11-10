@@ -1277,7 +1277,7 @@ func (s *URLTest) rrHealSearch() {
 // probe of the group — by the cursor or first by its live history — or C holds none.
 func (s *URLTest) rrLap() bool {
 	var candidates []string
-	for _, node := range s.group.outbounds {
+	for _, node := range s.group.getOutbounds() {
 		if s.rrCandidate(node) {
 			candidates = append(candidates, node.Tag())
 		}
@@ -1385,9 +1385,10 @@ func (s *URLTest) rrCandidateBatch(seen map[string]bool, size int) []adapter.Out
 	usable := func(node adapter.Outbound) bool {
 		return !seen[node.Tag()] && s.rrCandidate(node)
 	}
+	outbounds := g.getOutbounds()
 	var alive []candidate
 	byTag := make(map[string]adapter.Outbound)
-	for _, node := range g.outbounds {
+	for _, node := range outbounds {
 		if !usable(node) {
 			continue
 		}
@@ -1406,11 +1407,11 @@ func (s *URLTest) rrCandidateBatch(seen map[string]bool, size int) []adapter.Out
 		seen[entry.tag] = true
 		b.heal.poll(entry.tag) // o: polled first by its live history, the cursor stays (I8)
 	}
-	n := len(g.outbounds)
+	n := len(outbounds)
 	from := b.heal.cursor // I8: the walk goes from where the cursor stood; it moves past each one given
 	for step := 0; step < n && len(batch) < size; step++ {
 		i := (from + step) % n
-		node := g.outbounds[i]
+		node := outbounds[i]
 		if !usable(node) || byTag[node.Tag()] != nil {
 			continue
 		}
@@ -1431,7 +1432,7 @@ func (s *URLTest) rrCandidate(node adapter.Outbound) bool {
 
 // rrHasCandidate reports whether C holds a candidate to probe.
 func (s *URLTest) rrHasCandidate() bool {
-	for _, node := range s.group.outbounds {
+	for _, node := range s.group.getOutbounds() {
 		if s.rrCandidate(node) {
 			return true
 		}
