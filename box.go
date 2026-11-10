@@ -30,6 +30,7 @@ import (
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/protocol/direct"
+	sbprovider "github.com/sagernet/sing-box/provider"
 	"github.com/sagernet/sing-box/route"
 	"github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
@@ -80,6 +81,8 @@ func Context(
 	serviceRegistry adapter.ServiceRegistry,
 	certificateProviderRegistry adapter.CertificateProviderRegistry,
 ) context.Context {
+	// lx: sub — register provider options and adapters
+	ctx = sbprovider.Context(ctx)
 	if service.FromContext[option.InboundOptionsRegistry](ctx) == nil ||
 		service.FromContext[adapter.InboundRegistry](ctx) == nil {
 		ctx = service.ContextWith[option.InboundOptionsRegistry](ctx, inboundRegistry)
@@ -374,6 +377,13 @@ func New(options Options) (*Box, error) {
 			return nil, E.Cause(err, "initialize service[", i, "] ", serviceOptions.Type, "[", tag, "]")
 		}
 	}
+	// lx:begin sub
+	// Initialize configured providers before constructing outbounds and groups so
+	// provider member nodes are registered before groups resolve references.
+	if err = sbprovider.Install(ctx, router, logFactory, options.Providers); err != nil {
+		return nil, err
+	}
+	// lx:end sub
 	for i, outboundOptions := range options.Outbounds {
 		var tag string
 		if outboundOptions.Tag != "" {

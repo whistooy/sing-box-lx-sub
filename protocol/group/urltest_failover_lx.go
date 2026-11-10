@@ -85,8 +85,9 @@ func (g *URLTestGroup) failoverCheck(ctx context.Context) map[string]uint16 {
 		}
 	}
 	// Escalation: the failed or slow held node was just probed, skip it in the full run.
-	others := make([]adapter.Outbound, 0, len(g.outbounds))
-	for _, detour := range g.outbounds {
+	outbounds := g.getOutbounds()
+	others := make([]adapter.Outbound, 0, len(outbounds))
+	for _, detour := range outbounds {
 		if !failed[detour.Tag()] && !slow[detour.Tag()] {
 			others = append(others, detour)
 		}
@@ -137,7 +138,7 @@ func (g *URLTestGroup) failoverDegraded(node adapter.Outbound) bool {
 		}
 		var best uint16
 		found := false
-		for _, detour := range g.outbounds {
+		for _, detour := range g.getOutbounds() {
 			if detour == node || !supportsNetwork(detour, network) {
 				continue
 			}

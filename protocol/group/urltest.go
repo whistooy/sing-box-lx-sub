@@ -52,6 +52,7 @@ type URLTest struct {
 	interruptExternalConnections bool
 	balancer                     *balancer // lx: SPEC 019 — nil for least_test (default)
 	failover                     bool      // lx: SPEC 116 — mode: failover
+	providerTracker              *providerTracker
 }
 
 func NewURLTest(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.URLTestOutboundOptions) (adapter.Outbound, error) {
@@ -84,7 +85,10 @@ func NewURLTest(ctx context.Context, router adapter.Router, logger log.ContextLo
 		interruptExternalConnections: options.InterruptExistConnections,
 		balancer:                     balancer,
 		failover:                     failover,
+		providerTracker:              newProviderTracker(ctx, options.Outbounds, options.Providers, options.UseAllProviders),
 	}
+	// lx: sub — include nodes from referenced providers
+	outbound.tags = append(outbound.tags, outbound.providerTracker.InitialTags()...)
 	if len(outbound.tags) == 0 {
 		return nil, E.New("missing tags")
 	}
@@ -125,6 +129,11 @@ func (s *URLTest) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 		}
 		s.group = group
 	case adapter.StartStateStarted:
+		if s.providerTracker != nil {
+			s.providerTracker.Start(scope, func() {
+				s.updateGroup()
+			})
+		}
 		s.group.PostStart()
 		scope.Add(s.group.Close)
 	}
@@ -132,6 +141,9 @@ func (s *URLTest) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 }
 
 func (s *URLTest) All() []string {
+	if s.providerTracker != nil {
+		return s.providerTracker.All()
+	}
 	return s.tags
 }
 
@@ -371,6 +383,7 @@ type URLTestGroup struct {
 	pauseCallback                *list.Element[pause.Callback]
 	logger                       log.Logger
 	outbounds                    []adapter.Outbound
+	outboundsSnapshot            atomic.Pointer[[]adapter.Outbound]
 	link                         string
 	interval                     time.Duration
 	tolerance                    uint16
@@ -426,7 +439,7 @@ func NewURLTestGroup(ctx context.Context, outboundManager adapter.OutboundManage
 	// and the whole outbound slice alive across box shutdown, piling up one
 	// generation of zombies per restart.
 	ctx, cancel := context.WithCancel(ctx)
-	return &URLTestGroup{
+	group := &URLTestGroup{
 		ctx:                          ctx,
 		cancel:                       cancel,
 		outbound:                     outboundManager,
@@ -442,7 +455,16 @@ func NewURLTestGroup(ctx context.Context, outboundManager adapter.OutboundManage
 		interruptGroup:               interrupt.NewGroup(),
 		interruptExternalConnections: interruptExternalConnections,
 		reachability:                 service.FromContext[adapter.ReachabilityReporter](ctx), // lx: SPEC 020 — probe gating
-	}, nil
+	}
+	group.outboundsSnapshot.Store(&outbounds)
+	return group, nil
+}
+
+func (g *URLTestGroup) getOutbounds() []adapter.Outbound {
+	if p := g.outboundsSnapshot.Load(); p != nil {
+		return *p
+	}
+	return g.outbounds
 }
 
 func (g *URLTestGroup) PostStart() {
@@ -515,7 +537,8 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
 			}
 		}
 	}
-	for _, detour := range g.outbounds {
+	outbounds := g.getOutbounds()
+	for _, detour := range outbounds {
 		if !common.Contains(detour.Network(), network) {
 			continue
 		}
@@ -529,7 +552,7 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
 		}
 	}
 	if minOutbound == nil {
-		for _, detour := range g.outbounds {
+		for _, detour := range outbounds {
 			if !common.Contains(detour.Network(), network) {
 				continue
 			}
@@ -602,7 +625,7 @@ func (g *URLTestGroup) urlTest(ctx context.Context, force bool) (map[string]uint
 	if g.failover && !force {
 		return g.failoverCheck(ctx), nil
 	}
-	result := g.testNodes(ctx, g.outbounds, force)
+	result := g.testNodes(ctx, g.getOutbounds(), force)
 	if g.balancer != nil {
 		// force path (manual URLTest tested all nodes): rebuild the pool from fresh results.
 		g.rebuildPool()
@@ -799,8 +822,9 @@ func (g *URLTestGroup) performSelectionUpdate(reselect bool) {
 // poolSize is the effective pool size for the current node set: min(configured, available).
 func (g *URLTestGroup) poolSize() int {
 	size := g.balancer.poolSize
-	if size > len(g.outbounds) {
-		size = len(g.outbounds)
+	outbounds := g.getOutbounds()
+	if size > len(outbounds) {
+		size = len(outbounds)
 	}
 	return size
 }
@@ -864,8 +888,9 @@ func (g *URLTestGroup) balancePoolFirstLive(ctx context.Context, size int) map[s
 	// walk non-pool nodes in config order, testing in batches of `size` (a full pool's worth)
 	// in parallel, until no holes remain or nodes run out.
 	if emptySlot(0) >= 0 {
-		candidates := make([]adapter.Outbound, 0, len(g.outbounds))
-		for _, detour := range g.outbounds {
+		outbounds := g.getOutbounds()
+		candidates := make([]adapter.Outbound, 0, len(outbounds))
+		for _, detour := range outbounds {
 			if !inPool[detour.Tag()] {
 				candidates = append(candidates, detour)
 			}
@@ -928,9 +953,10 @@ func (g *URLTestGroup) balancePoolFirstLive(ctx context.Context, size int) map[s
 // balancePoolTolerant (pool_tolerance > 0): test all nodes, then pick the top-`size` by delay,
 // replacing a pool member only when an outside node beats it by more than the tolerance.
 func (g *URLTestGroup) balancePoolTolerant(ctx context.Context, size int) map[string]uint16 {
-	result := g.testNodes(ctx, g.outbounds, true)
-	results := make(map[string]candidate, len(g.outbounds))
-	for _, detour := range g.outbounds {
+	outbounds := g.getOutbounds()
+	result := g.testNodes(ctx, outbounds, true)
+	results := make(map[string]candidate, len(outbounds))
+	for _, detour := range outbounds {
 		tag := detour.Tag()
 		if delay, ok := result[tag]; ok {
 			results[tag] = candidate{tag: tag, delay: delay, alive: true}
@@ -952,8 +978,9 @@ func (g *URLTestGroup) rebuildPool() {
 	if size == 0 {
 		return
 	}
-	results := make(map[string]candidate, len(g.outbounds))
-	for _, detour := range g.outbounds {
+	outbounds := g.getOutbounds()
+	results := make(map[string]candidate, len(outbounds))
+	for _, detour := range outbounds {
 		tag := detour.Tag()
 		if history := g.history.LoadURLTestHistory(RealTag(detour, N.NetworkTCP)); history != nil {
 			results[tag] = candidate{tag: tag, delay: history.Delay, alive: true}
@@ -977,7 +1004,7 @@ func (g *URLTestGroup) rebuildPool() {
 		}
 		// Fill holes with live non-pool nodes, fastest first (history is warm after the force test).
 		fillCandidates := make([]candidate, 0, len(results))
-		for _, detour := range g.outbounds {
+		for _, detour := range outbounds {
 			tag := detour.Tag()
 			if c, ok := results[tag]; ok && c.alive && !inPool[tag] {
 				fillCandidates = append(fillCandidates, c)
@@ -1004,9 +1031,10 @@ func (g *URLTestGroup) seedPool() {
 	if size == 0 {
 		return
 	}
+	outbounds := g.getOutbounds()
 	// Nodes with existing history first (top by delay), then config order to fill.
-	withHistory := make([]candidate, 0, len(g.outbounds))
-	for _, detour := range g.outbounds {
+	withHistory := make([]candidate, 0, len(outbounds))
+	for _, detour := range outbounds {
 		if history := g.history.LoadURLTestHistory(RealTag(detour, N.NetworkTCP)); history != nil {
 			withHistory = append(withHistory, candidate{tag: detour.Tag(), delay: history.Delay, alive: true})
 		}
@@ -1021,7 +1049,7 @@ func (g *URLTestGroup) seedPool() {
 		next = append(next, c.tag)
 		seen[c.tag] = true
 	}
-	for _, detour := range g.outbounds {
+	for _, detour := range outbounds {
 		if len(next) >= size {
 			break
 		}

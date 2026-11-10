@@ -103,7 +103,7 @@ func ageHistory(g *URLTestGroup) {
 	if nanos := g.lastTickRunEnd.Load(); nanos != 0 {
 		g.lastTickRunEnd.Store(nanos - int64(2*g.interval))
 	}
-	for _, detour := range g.outbounds {
+	for _, detour := range g.getOutbounds() {
 		if history := g.history.LoadURLTestHistory(detour.Tag()); history != nil {
 			g.history.StoreURLTestHistory(detour.Tag(), &adapter.URLTestHistory{Time: time.Now().Add(-2 * g.interval), Delay: history.Delay})
 		}

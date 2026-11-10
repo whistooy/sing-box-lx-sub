@@ -42,6 +42,7 @@ type Selector struct {
 	history                      *urltest.HistoryStorage
 	interruptGroup               *interrupt.Group
 	interruptExternalConnections bool
+	providerTracker              *providerTracker
 }
 
 func NewSelector(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.SelectorOutboundOptions) (adapter.Outbound, error) {
@@ -56,7 +57,10 @@ func NewSelector(ctx context.Context, router adapter.Router, logger log.ContextL
 		history:                      service.PtrFromContext[urltest.HistoryStorage](ctx),
 		interruptGroup:               interrupt.NewGroup(),
 		interruptExternalConnections: options.InterruptExistConnections,
+		providerTracker:              newProviderTracker(ctx, options.Outbounds, options.Providers, options.UseAllProviders),
 	}
+	// lx: sub — include nodes from referenced providers
+	outbound.tags = append(outbound.tags, outbound.providerTracker.InitialTags()...)
 	if len(outbound.tags) == 0 {
 		return nil, E.New("missing tags")
 	}
@@ -88,6 +92,8 @@ func (s *Selector) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 		s.outbounds[tag] = detour
 	}
 
+	s.startProviderTracker(scope)
+
 	if s.Tag() != "" {
 		cacheFile := service.FromContext[adapter.CacheFile](s.ctx)
 		if cacheFile != nil {
@@ -116,6 +122,9 @@ func (s *Selector) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 }
 
 func (s *Selector) All() []string {
+	if s.providerTracker != nil {
+		return s.providerTracker.All()
+	}
 	return s.tags
 }
 
@@ -130,13 +139,17 @@ func (s *Selector) AttachConnection(closer io.Closer) func() {
 func (s *Selector) References() []string {
 	selected := s.selected.Load()
 	if selected == nil {
-		return s.tags[:1]
+		tags := s.All()
+		if len(tags) == 0 {
+			return nil
+		}
+		return tags[:1]
 	}
 	return []string{selected.Tag()}
 }
 
 func (s *Selector) SelectOutbound(tag string) bool {
-	detour, loaded := s.outbounds[tag]
+	detour, loaded := s.resolveOutbound(tag)
 	if !loaded {
 		return false
 	}
