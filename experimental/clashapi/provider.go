@@ -1,52 +1,26 @@
 package clashapi
 
+// lx: sub — clash proxy provider endpoints
+
 import (
 	"context"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/render"
 )
 
-func proxyProviderRouter() http.Handler {
+func proxyProviderRouter(server *Server) http.Handler {
 	r := chi.NewRouter()
-	r.Get("/", getProviders)
+	r.Get("/", getProviders(server))
 
 	r.Route("/{name}", func(r chi.Router) {
-		r.Use(parseProviderName, findProviderByName)
+		r.Use(parseProviderName, findProviderByName(server))
 		r.Get("/", getProvider)
 		r.Put("/", updateProvider)
-		r.Get("/healthcheck", healthCheckProvider)
+		r.Get("/healthcheck", healthCheckProvider(server))
+		r.Get("/{proxyName}/healthcheck", getProviderProxyDelay(server))
 	})
 	return r
-}
-
-func getProviders(w http.ResponseWriter, r *http.Request) {
-	render.JSON(w, r, render.M{
-		"providers": render.M{},
-	})
-}
-
-func getProvider(w http.ResponseWriter, r *http.Request) {
-	/*provider := r.Context().Value(CtxKeyProvider).(provider.ProxyProvider)
-	render.JSON(w, r, provider)*/
-	render.NoContent(w, r)
-}
-
-func updateProvider(w http.ResponseWriter, r *http.Request) {
-	/*provider := r.Context().Value(CtxKeyProvider).(provider.ProxyProvider)
-	if err := provider.Update(); err != nil {
-		render.Status(r, http.StatusServiceUnavailable)
-		render.JSON(w, r, newError(err.Error()))
-		return
-	}*/
-	render.NoContent(w, r)
-}
-
-func healthCheckProvider(w http.ResponseWriter, r *http.Request) {
-	/*provider := r.Context().Value(CtxKeyProvider).(provider.ProxyProvider)
-	provider.HealthCheck()*/
-	render.NoContent(w, r)
 }
 
 func parseProviderName(next http.Handler) http.Handler {
@@ -54,21 +28,5 @@ func parseProviderName(next http.Handler) http.Handler {
 		name := getEscapeParam(r, "name")
 		ctx := context.WithValue(r.Context(), CtxKeyProviderName, name)
 		next.ServeHTTP(w, r.WithContext(ctx))
-	})
-}
-
-func findProviderByName(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		/*name := r.Context().Value(CtxKeyProviderName).(string)
-		providers := tunnel.ProxyProviders()
-		provider, exist := providers[name]
-		if !exist {*/
-		render.Status(r, http.StatusNotFound)
-		render.JSON(w, r, ErrNotFound)
-		//return
-		//}
-
-		// ctx := context.WithValue(r.Context(), CtxKeyProvider, provider)
-		// next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

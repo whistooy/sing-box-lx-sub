@@ -15,6 +15,9 @@ import (
 // protocol/group never imports route. A nil invalidator (feature/route absent) is
 // a no-op.
 func invalidateReachability(ctx context.Context) {
+	if ctx == nil {
+		return
+	}
 	if invalidator := service.FromContext[adapter.ReachabilityInvalidator](ctx); invalidator != nil {
 		invalidator.InvalidateReachability()
 	}
