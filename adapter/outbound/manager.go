@@ -23,6 +23,7 @@ type Manager struct {
 	outboundByTag           map[string]adapter.Outbound
 	defaultOutbound         adapter.Outbound
 	defaultOutboundFallback func() (adapter.Outbound, error)
+	stage                   adapter.StartStage
 	// lx:begin chain
 	// SPEC 073: опции созданных outbound'ов по тегу (фабрика звеньев цепочки
 	// пересоздаёт узел из них) и внутренние outbound'ы (хопы цепочки) — видны
@@ -30,6 +31,10 @@ type Manager struct {
 	optionsByTag  map[string]managedOptions
 	internalByTag map[string]adapter.Outbound
 	// lx:end chain
+	dynamicScopes    map[string]*adapter.Scope // lx: sub — managed lifecycle scopes for dynamic nodes
+	dynamicTags      map[string]struct{}       // lx: sub — tracked dynamic provider tags
+	dynamicClosed    bool                      // lx: sub — closed flag for dynamic scopes
+	providerCleanups []func() error            // lx: sub — cleanup callbacks for dynamic providers on shutdown
 }
 
 func NewManager(registry adapter.OutboundRegistry, endpoint adapter.EndpointManager, defaultTag string) *Manager {
@@ -42,6 +47,8 @@ func NewManager(registry adapter.OutboundRegistry, endpoint adapter.EndpointMana
 		optionsByTag:  make(map[string]managedOptions),
 		internalByTag: make(map[string]adapter.Outbound),
 		// lx:end chain
+		dynamicScopes: make(map[string]*adapter.Scope),
+		dynamicTags:   make(map[string]struct{}),
 	}
 }
 
@@ -51,6 +58,7 @@ func (m *Manager) Initialize(defaultOutboundFallback func() (adapter.Outbound, e
 
 func (m *Manager) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 	m.access.Lock()
+	m.stage = stage // lx: sub — record current start stage for dynamic lifecycle
 	if stage == adapter.StartStateInitialize {
 		if m.defaultTag != "" && m.defaultOutbound == nil {
 			defaultEndpoint, loaded := m.endpoint.Get(m.defaultTag)
@@ -74,15 +82,21 @@ func (m *Manager) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 	outbounds := m.outbounds
 	m.access.Unlock()
 	if stage == adapter.StartStateStart {
-		return m.startOutbounds(scope, append(outbounds, common.Map(m.endpoint.Endpoints(), func(it adapter.Endpoint) adapter.Outbound { return it })...))
+		scope.Add(m.closeDynamicScopes)
+		var endpoints []adapter.Outbound
+		if m.endpoint != nil {
+			endpoints = common.Map(m.endpoint.Endpoints(), func(it adapter.Endpoint) adapter.Outbound { return it })
+		}
+		return m.startOutbounds(scope, append(outbounds, endpoints...))
 	}
 	for _, outbound := range outbounds {
 		lifecycle, isLifecycle := outbound.(adapter.Lifecycle)
 		if !isLifecycle {
 			continue
 		}
+		targetScope := m.targetScope(scope, outbound.Tag())
 		name := "outbound/" + outbound.Type() + "[" + outbound.Tag() + "]"
-		err := scope.Start(name, lifecycle, stage)
+		err := targetScope.Start(name, lifecycle, stage)
 		if err != nil {
 			return err
 		}
@@ -108,7 +122,7 @@ func (m *Manager) startOutbounds(scope *adapter.Scope, outbounds []adapter.Outbo
 			}
 			started[outboundTag] = true
 			canContinue = true
-			if endpoint, isEndpoint := outboundToStart.(adapter.Endpoint); isEndpoint {
+			if endpoint, isEndpoint := outboundToStart.(adapter.Endpoint); isEndpoint && m.endpoint != nil {
 				err := m.endpoint.StartEndpoint(endpoint)
 				if err != nil {
 					return err
@@ -120,7 +134,8 @@ func (m *Manager) startOutbounds(scope *adapter.Scope, outbounds []adapter.Outbo
 				continue
 			}
 			name := "outbound/" + outboundToStart.Type() + "[" + outboundTag + "]"
-			err := scope.Start(name, lifecycle, adapter.StartStateStart)
+			targetScope := m.targetScope(scope, outboundTag)
+			err := targetScope.Start(name, lifecycle, adapter.StartStateStart)
 			if err != nil {
 				return err
 			}
@@ -195,6 +210,9 @@ func (m *Manager) Create(ctx context.Context, router adapter.Router, logger log.
 	}
 	m.access.Lock()
 	defer m.access.Unlock()
+	if err = m.checkDynamicClosed(outbound); err != nil {
+		return err
+	}
 	_, loaded := m.outboundByTag[tag]
 	if loaded {
 		return E.New("duplicate outbound tag: ", tag)
@@ -202,8 +220,20 @@ func (m *Manager) Create(ctx context.Context, router adapter.Router, logger log.
 	m.outbounds = append(m.outbounds, outbound)
 	m.outboundByTag[tag] = outbound
 	m.optionsByTag[tag] = managedOptions{outboundType: inboundType, options: options} // lx: chain
-	if tag == m.defaultTag || (m.defaultTag == "" && m.defaultOutbound == nil) {
+	isExplicitDefault := m.defaultTag != "" && tag == m.defaultTag
+	isImplicitDefault := m.defaultTag == "" && m.defaultOutbound == nil && !m.isDynamicTagLocked(tag)
+	if isExplicitDefault || isImplicitDefault {
 		m.defaultOutbound = outbound
+	}
+	if tag == adapter.ProviderFallbackTag {
+		m.dynamicTags[tag] = struct{}{}
+	}
+	// lx: sub — start lifecycle for dynamic outbound
+	if scope, err := m.startDynamicLifecycle(ctx, logger, outbound, inboundType, tag, m.stage); err != nil {
+		m.cleanupFailedCreate(tag, outbound)
+		return err
+	} else if scope != nil {
+		m.dynamicScopes[tag] = scope
 	}
 	return nil
 }

@@ -17,7 +17,7 @@ func shiftTime(g *URLTestGroup, d time.Duration) {
 	if nanos := g.lastTickRunEnd.Load(); nanos != 0 {
 		g.lastTickRunEnd.Store(nanos - int64(d))
 	}
-	for _, detour := range g.outbounds {
+	for _, detour := range g.getOutbounds() {
 		if history := g.history.LoadURLTestHistory(detour.Tag()); history != nil {
 			g.history.StoreURLTestHistory(detour.Tag(), &adapter.URLTestHistory{Time: history.Time.Add(-d), Delay: history.Delay})
 		}
